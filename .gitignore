@@ -1,0 +1,10 @@
+# Machine-specific Android SDK path
+**/local.properties
+
+# Generated Gradle and Android build files
+**/.gradle/
+**/build/
+
+# IDE workspace files
+**/.idea/
+*.iml
