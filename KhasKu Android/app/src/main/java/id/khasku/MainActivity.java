@@ -48,6 +48,7 @@ public class MainActivity extends Activity {
     private boolean selectedCrumbs;
     private boolean lastSavedCrumbs;
     private long lastSavedAmount;
+    private int crumbsWeekOffset;
 
     @Override public void onCreate(Bundle state){super.onCreate(state); getWindow().setStatusBarColor(BG); getWindow().setNavigationBarColor(Color.WHITE); getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR); prefs=getSharedPreferences("khasku_local",MODE_PRIVATE); render();}
     private int dp(float n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
@@ -244,24 +245,275 @@ public class MainActivity extends Activity {
 
     private void recehan(){
         header();
-        text(content,"Jejak Recehan",23,DARK,true);
-        text(content,"Minggu ini · "+weekRange(),13,MUTED,false);
+        long from=crumbWeekStart();
+        long to=crumbWeekEnd();
+        LinearLayout titleRow=row(content);
+        LinearLayout titleCopy=new LinearLayout(this);
+        titleCopy.setOrientation(LinearLayout.VERTICAL);
+        titleRow.addView(titleCopy,new LinearLayout.LayoutParams(0,-2,1));
+        text(titleCopy,"Jejak Recehan",23,DARK,true);
+        text(titleCopy,(crumbsWeekOffset==0?"Minggu ini · ":"Minggu lalu · ")+weekRange(from),13,MUTED,false);
+        pill(titleRow,crumbsWeekOffset==0?"Minggu Ini  ⌄":"Minggu Lalu  ⌄",()->new AlertDialog.Builder(this)
+                .setItems(new String[]{"Minggu Ini","Minggu Lalu"},(dialog,which)->{crumbsWeekOffset=which;render();}).show(),false);
+
         LinearLayout total=card(content);
-        text(total,"Pengeluaran mikro & receh",14,TEAL,true);
-        text(total,crumbCountSince(weekStart())+" transaksi",12,MUTED,false);
-        text(total,money(crumbsSince(weekStart())),29,0xffbd4317,true);
-        LinearLayout estimate=card(content);
-        text(estimate,"Estimasi 4 minggu",13,MUTED,false);
-        text(estimate,money(crumbsSince(weekStart())*4),18,DARK,true);
-        text(estimate,"Dengan pola serupa",12,MUTED,false);
+        LinearLayout totalHeading=row(total);
+        TextView tag=makeText("♧ Pengeluaran Mikro & Receh",12,0xffbd4317,true);
+        tag.setPadding(dp(9),dp(5),dp(9),dp(5));
+        tag.setBackground(shape(0xfffff1c2,dp(18)));
+        totalHeading.addView(tag);
+        View spacer=new View(this);
+        totalHeading.addView(spacer,new LinearLayout.LayoutParams(0,1,1));
+        text(totalHeading,crumbCountInRange(from,to)+" Transaksi",13,MUTED,false);
+        text(total,"Total recehan "+(crumbsWeekOffset==0?"minggu ini":"minggu lalu"),13,MUTED,false);
+        text(total,money(crumbsInRange(from,to)),29,0xffbd4317,true);
+
+        LinearLayout estimate=new LinearLayout(this);
+        estimate.setGravity(Gravity.CENTER_VERTICAL);
+        estimate.setPadding(dp(12),dp(10),dp(12),dp(10));
+        estimate.setBackground(shape(0xfff1f0ff,dp(14)));
+        LinearLayout.LayoutParams estimateParams=space(-2);
+        estimateParams.topMargin=dp(4);
+        total.addView(estimate,estimateParams);
+        TextView estimateIcon=makeText("↗",17,0xffd69a16,true);
+        estimateIcon.setGravity(Gravity.CENTER);
+        estimateIcon.setBackground(shape(0xfffff1c2,dp(20)));
+        estimate.addView(estimateIcon,new LinearLayout.LayoutParams(dp(32),dp(32)));
+        LinearLayout estimateCopy=new LinearLayout(this);
+        estimateCopy.setOrientation(LinearLayout.VERTICAL);
+        estimateCopy.setPadding(dp(9),0,0,0);
+        estimate.addView(estimateCopy);
+        text(estimateCopy,"Estimasi 4 minggu: "+money(crumbsInRange(from,to)*4),13,MUTED,true);
+        text(estimateCopy,"dengan pola serupa",12,MUTED,false);
+
+        button(content,"⊕  Catat recehan sekarang",()->{selectedCrumbs=true;screen="Transaksi";render();});
+
         LinearLayout distribution=card(content);
-        text(distribution,"Sebaran recehan terbesar",16,DARK,true);
-        addTopCrumbRows(distribution,weekStart());
-        text(content,"Transaksi Recehan",17,DARK,true);
-        addTransactionRows(content,0);
+        LinearLayout distributionHeading=row(distribution);
+        text(distributionHeading,"◴  Sebaran Recehan Terbesar",15,DARK,true);
+        View distributionSpacer=new View(this);
+        distributionHeading.addView(distributionSpacer,new LinearLayout.LayoutParams(0,1,1));
+        text(distributionHeading,crumbsWeekOffset==0?"Minggu ini":"Minggu lalu",12,MUTED,false);
+        long[] buckets=crumbBuckets(from,to);
+        addCrumbDistribution(distribution,buckets);
+
+        addCrumbTransactions(content,from,to);
+
         LinearLayout tip=card(content);
-        text(tip,"Tips Anti-Bocor Halus",16,TEAL,true);
+        LinearLayout tipHeading=row(tip);
+        TextView bulb=makeText("♧",18,TEAL,true);
+        bulb.setGravity(Gravity.CENTER);
+        bulb.setBackground(shape(Color.WHITE,dp(20)));
+        tipHeading.addView(bulb,new LinearLayout.LayoutParams(dp(36),dp(36)));
+        TextView tipTitle=text(tipHeading,"Tips Anti-Bocor Halus",15,TEAL,true);
+        tipTitle.setPadding(dp(10),0,0,0);
         text(tip,"Pantau pengeluaran kecil untuk memahami pola belanjamu.",13,MUTED,false);
+        tip.setBackground(shape(0xffe4f3f0,dp(18)));
+    }
+
+    private long[] crumbBuckets(long from,long to){
+        long[] totals=new long[5];
+        JSONArray all=transactions();
+        for(int i=0;i<all.length();i++){
+            JSONObject o=all.optJSONObject(i);
+            if(o==null||!o.optBoolean("crumbs",false)||o.optLong("date")<from||o.optLong("date")>=to)continue;
+            totals[crumbBucketIndex(o.optString("category"))]+=o.optLong("amount");
+        }
+        return totals;
+    }
+
+    private int crumbBucketIndex(String category){
+        if("Top-up gim".equals(category))return 0;
+        if("Kopi susu aren".equals(category)||"Jalan-jalan".equals(category)||"Belanja".equals(category))return 1;
+        if("Langganan musik".equals(category))return 2;
+        if("Parkir kampus".equals(category))return 3;
+        return 4;
+    }
+
+    private void addCrumbDistribution(LinearLayout parent,long[] totals){
+        String[] labels={"Top-up gim","Kopi / Jajan","Langganan","Parkir","Lainnya"};
+        int[] colors={0xffbd4317,0xffff7043,0xff554be8,TEAL,0xff788494};
+        long sum=0;
+        for(long total:totals)sum+=total;
+        LinearLayout bar=new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setBackground(shape(0xffe6e9f2,dp(8)));
+        bar.setClipToOutline(true);
+        LinearLayout.LayoutParams barParams=space(7);
+        barParams.topMargin=dp(4);
+        barParams.bottomMargin=dp(12);
+        parent.addView(bar,barParams);
+        if(sum>0){
+            for(int i=0;i<totals.length;i++){
+                if(totals[i]==0)continue;
+                View segment=new View(this);
+                segment.setBackgroundColor(colors[i]);
+                bar.addView(segment,new LinearLayout.LayoutParams(0,-1,(float)totals[i]));
+            }
+        }
+        LinearLayout legendRow=null;
+        for(int i=0;i<labels.length;i++){
+            if(totals[i]==0)continue;
+            if(legendRow==null||legendRow.getChildCount()==2)legendRow=row(parent);
+            LinearLayout cell=new LinearLayout(this);
+            cell.setOrientation(LinearLayout.HORIZONTAL);
+            cell.setGravity(Gravity.CENTER_VERTICAL);
+            cell.setPadding(dp(8),dp(8),dp(8),dp(8));
+            cell.setBackground(shape(0xfff1f0ff,dp(12)));
+            TextView dot=makeText("●",12,colors[i],true);
+            cell.addView(dot);
+            TextView label=makeText(labels[i],12,DARK,false);
+            LinearLayout.LayoutParams labelParams=new LinearLayout.LayoutParams(0,-2,1);
+            labelParams.leftMargin=dp(6);
+            cell.addView(label,labelParams);
+            int pct=sum==0?0:(int)Math.round(totals[i]*100d/sum);
+            cell.addView(makeText(pct+"%",12,DARK,false));
+            LinearLayout.LayoutParams cellParams=new LinearLayout.LayoutParams(0,-2,1);
+            cellParams.setMargins(0,dp(4),dp(5),dp(4));
+            legendRow.addView(cell,cellParams);
+        }
+        if(legendRow!=null&&legendRow.getChildCount()==1)legendRow.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
+    }
+
+    private void addCrumbTransactions(LinearLayout parent,long from,long to){
+        JSONArray all=transactions();
+        java.util.ArrayList<JSONObject> entries=new java.util.ArrayList<>();
+        for(int i=all.length()-1;i>=0;i--){
+            JSONObject o=all.optJSONObject(i);
+            if(o!=null&&o.optBoolean("crumbs",false)&&o.optLong("date")>=from&&o.optLong("date")<to)entries.add(o);
+        }
+        if(entries.isEmpty()){
+            text(parent,"Belum ada recehan tercatat minggu ini.",14,MUTED,false);
+            return;
+        }
+        int position=0;
+        while(position<entries.size()){
+            long firstDate=entries.get(position).optLong("date");
+            Calendar first=Calendar.getInstance();
+            first.setTimeInMillis(firstDate);
+            long dayTotal=0;
+            int end=position;
+            while(end<entries.size()){
+                Calendar candidate=Calendar.getInstance();
+                candidate.setTimeInMillis(entries.get(end).optLong("date"));
+                if(first.get(Calendar.YEAR)!=candidate.get(Calendar.YEAR)||first.get(Calendar.DAY_OF_YEAR)!=candidate.get(Calendar.DAY_OF_YEAR))break;
+                dayTotal+=entries.get(end).optLong("amount");
+                end++;
+            }
+            LinearLayout dayHeading=row(parent);
+            TextView date=text(dayHeading,transactionDayLabel(firstDate),13,MUTED,true);
+            View spacer=new View(this);
+            dayHeading.addView(spacer,new LinearLayout.LayoutParams(0,1,1));
+            text(dayHeading,"-"+money(dayTotal),13,0xffbd4317,true);
+            for(int i=position;i<end;i++)addCrumbTransactionCard(parent,entries.get(i));
+            position=end;
+        }
+    }
+
+    private String transactionDayLabel(long timestamp){
+        Calendar day=Calendar.getInstance();
+        day.setTimeInMillis(timestamp);
+        Calendar today=Calendar.getInstance();
+        Calendar yesterday=(Calendar)today.clone();
+        yesterday.add(Calendar.DAY_OF_YEAR,-1);
+        if(day.get(Calendar.YEAR)==today.get(Calendar.YEAR)&&day.get(Calendar.DAY_OF_YEAR)==today.get(Calendar.DAY_OF_YEAR))return "Hari ini, "+new SimpleDateFormat("d MMM",new Locale("id","ID")).format(day.getTime());
+        if(day.get(Calendar.YEAR)==yesterday.get(Calendar.YEAR)&&day.get(Calendar.DAY_OF_YEAR)==yesterday.get(Calendar.DAY_OF_YEAR))return "Kemarin, "+new SimpleDateFormat("d MMM",new Locale("id","ID")).format(day.getTime());
+        return new SimpleDateFormat("EEEE, d MMM",new Locale("id","ID")).format(day.getTime());
+    }
+
+    private void addCrumbTransactionCard(LinearLayout parent,JSONObject transaction){
+        String category=transaction.optString("category","Pengeluaran");
+        int bucket=crumbBucketIndex(category);
+        int[] iconBackgrounds={0xfffff2c5,0xffffe8dd,0xffe8e6ff,0xffe3f2ef,0xffe3f2ef};
+        int[] iconColors={0xffbd4317,0xffbd5a35,0xff554be8,TEAL,MUTED};
+        String iconValue=categoryIcon(category);
+        LinearLayout item=card(parent);
+        item.setPadding(dp(10),dp(9),dp(10),dp(9));
+        LinearLayout row=row(item);
+        TextView icon=makeText(iconValue,18,iconColors[bucket],true);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(shape(iconBackgrounds[bucket],dp(12)));
+        row.addView(icon,new LinearLayout.LayoutParams(dp(44),dp(44)));
+        LinearLayout copy=new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        copy.setPadding(dp(9),0,dp(5),0);
+        row.addView(copy,new LinearLayout.LayoutParams(0,-2,1));
+        LinearLayout titleRow=row(copy);
+        text(titleRow,category,14,DARK,true);
+        TextView badge=makeText("Recehan",10,bucket==1?0xffbd4317:TEAL,true);
+        badge.setPadding(dp(6),dp(3),dp(6),dp(3));
+        badge.setBackground(shape(bucket==1?0xfffff1c2:0xffe4f3f0,dp(8)));
+        LinearLayout.LayoutParams badgeParams=(LinearLayout.LayoutParams)badge.getLayoutParams();
+        badgeParams.leftMargin=dp(6);
+        badge.setLayoutParams(badgeParams);
+        titleRow.addView(badge);
+        String note=transaction.optString("note","").trim();
+        String details=transaction.optString("group","")+" • "+new SimpleDateFormat("HH:mm",new Locale("id","ID")).format(new Date(transaction.optLong("date")));
+        if(!note.isEmpty())details+=" • "+note;
+        text(copy,details,11,MUTED,false);
+        int amountColor="Parkir kampus".equals(category)?DARK:0xffbd4317;
+        text(row,"-"+money(transaction.optLong("amount")),14,amountColor,true);
+    }
+
+    private String categoryIcon(String category){
+        switch(category){
+            case "Top-up gim":return "🎮";
+            case "Kopi susu aren":return "☕";
+            case "Parkir kampus":return "P";
+            case "Langganan musik":return "♫";
+            case "Makan":return "🍴";
+            case "Transportasi":return "↔";
+            case "Kuliah":return "▤";
+            case "Kos":return "⌂";
+            default:return "•";
+        }
+    }
+
+    private long crumbWeekStart(){
+        Calendar start=Calendar.getInstance();
+        start.setTimeInMillis(weekStart());
+        start.add(Calendar.WEEK_OF_YEAR,-crumbsWeekOffset);
+        return start.getTimeInMillis();
+    }
+
+    private long crumbWeekEnd(){
+        Calendar end=Calendar.getInstance();
+        end.setTimeInMillis(crumbWeekStart());
+        end.add(Calendar.WEEK_OF_YEAR,1);
+        return end.getTimeInMillis();
+    }
+
+    private long crumbsInRange(long from,long to){
+        long sum=0;
+        JSONArray all=transactions();
+        for(int i=0;i<all.length();i++){
+            JSONObject o=all.optJSONObject(i);
+            if(o!=null&&o.optBoolean("crumbs",false)&&o.optLong("date")>=from&&o.optLong("date")<to)sum+=o.optLong("amount");
+        }
+        return sum;
+    }
+
+    private int crumbCountInRange(long from,long to){
+        int count=0;
+        JSONArray all=transactions();
+        for(int i=0;i<all.length();i++){
+            JSONObject o=all.optJSONObject(i);
+            if(o!=null&&o.optBoolean("crumbs",false)&&o.optLong("date")>=from&&o.optLong("date")<to)count++;
+        }
+        return count;
+    }
+
+    private String weekRange(long startMillis){
+        Calendar start=Calendar.getInstance();
+        start.setTimeInMillis(startMillis);
+        Calendar end=(Calendar)start.clone();
+        end.add(Calendar.DAY_OF_YEAR,6);
+        Locale locale=new Locale("id","ID");
+        SimpleDateFormat startDay=new SimpleDateFormat("d",locale);
+        SimpleDateFormat startDate=new SimpleDateFormat("d MMM",locale);
+        SimpleDateFormat endDate=new SimpleDateFormat("d MMM",locale);
+        boolean sameMonth=start.get(Calendar.MONTH)==end.get(Calendar.MONTH);
+        return (sameMonth?startDay.format(start.getTime()):startDate.format(start.getTime()))+"–"+endDate.format(end.getTime());
     }
 
     private void saved(){
