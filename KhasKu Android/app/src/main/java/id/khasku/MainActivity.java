@@ -32,25 +32,31 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Calendar;
 import java.util.Locale;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.UUID;
 
 public class MainActivity extends Activity {
     private static final int TEAL=0xff147c72, DARK=0xff172033, BG=0xfff6f8fb, MUTED=0xff718087;
-    private static final String[] GROUPS={"Kebutuhan","Keinginan","Tabungan"};
-    private static final String[] CATEGORIES={"Makan","Transportasi","Kuliah","Kos","Pulsa & Data","Jalan-jalan","Belanja","Top-up gim","Kopi susu aren","Parkir kampus","Langganan musik"};
+    private static final String DEFAULT_WALLET_ID="default";
+    private static final String[] GROUPS={"Kebutuhan","Keinginan","Dana Darurat"};
+    private static final String[] CATEGORIES={"Makan","Transportasi","Kuliah","Kos","Pulsa & Data","Jalan-jalan","Belanja","Top-up gim","Kopi susu aren","Parkir kampus","Langganan musik","Dana darurat"};
     private static final int[] COLORS={0xff15977f,0xffec8650,0xff665de8};
     private SharedPreferences prefs;
     private LinearLayout page, content;
     private String screen="Beranda", selectedGroup="Kebutuhan", selectedCategory="Makan";
+    private String selectedWalletId=DEFAULT_WALLET_ID;
     private EditText amountInput, noteInput;
     private int period=0;
     private String draftAmount="", draftNote="";
     private String historyFilter="Semua", historyCategory="";
+    private int editingTransactionIndex=-1;
     private boolean selectedCrumbs;
     private boolean lastSavedCrumbs;
     private long lastSavedAmount;
     private int crumbsWeekOffset;
 
-    @Override public void onCreate(Bundle state){super.onCreate(state); getWindow().setStatusBarColor(BG); getWindow().setNavigationBarColor(Color.WHITE); getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR); prefs=getSharedPreferences("khasku_local",MODE_PRIVATE); render();}
+    @Override public void onCreate(Bundle state){super.onCreate(state); getWindow().setStatusBarColor(BG); getWindow().setNavigationBarColor(Color.WHITE); getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR); prefs=getSharedPreferences("khasku_local",MODE_PRIVATE); ensureLedgerData(); selectedWalletId=prefs.getString("activeWallet",DEFAULT_WALLET_ID); render();}
     private int dp(float n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
     private String money(long n){return "Rp"+NumberFormat.getInstance(new Locale("id","ID")).format(n);}
     private long budget(){return prefs.getLong("budget",0);}
@@ -59,20 +65,95 @@ public class MainActivity extends Activity {
     private long periodStart(){Calendar c=Calendar.getInstance();int today=c.get(Calendar.DAY_OF_MONTH),day=prefs.getInt("payoutDay",1);c.set(Calendar.DAY_OF_MONTH,1);int effectiveDay=Math.min(day,c.getActualMaximum(Calendar.DAY_OF_MONTH));if(today<effectiveDay)c.add(Calendar.MONTH,-1);c.set(Calendar.DAY_OF_MONTH,Math.min(day,c.getActualMaximum(Calendar.DAY_OF_MONTH)));c.set(Calendar.HOUR_OF_DAY,0);c.set(Calendar.MINUTE,0);c.set(Calendar.SECOND,0);c.set(Calendar.MILLISECOND,0);return c.getTimeInMillis();}
     private long weekStart(){Calendar c=Calendar.getInstance();c.set(Calendar.DAY_OF_WEEK,c.getFirstDayOfWeek());c.set(Calendar.HOUR_OF_DAY,0);c.set(Calendar.MINUTE,0);c.set(Calendar.SECOND,0);c.set(Calendar.MILLISECOND,0);return c.getTimeInMillis();}
     private int share(int index){return prefs.getInt("share"+index,new int[]{50,30,20}[index]);}
+    private String allocationTitle(){return "Alokasi "+share(0)+" / "+share(1)+" / "+share(2);}
     private JSONArray transactions(){try{return new JSONArray(prefs.getString("transactions","[]"));}catch(Exception e){return new JSONArray();}}
+    private JSONArray wallets(){try{return new JSONArray(prefs.getString("wallets","[]"));}catch(org.json.JSONException e){android.util.Log.e("KhasKu","Could not read wallets",e);return new JSONArray();}}
+    private JSONArray customCategories(){try{return new JSONArray(prefs.getString("customCategories","[]"));}catch(org.json.JSONException e){android.util.Log.e("KhasKu","Could not read custom categories",e);return new JSONArray();}}
+    private void ensureLedgerData(){
+        JSONArray walletList=wallets();
+        if(walletList.length()==0){
+            JSONObject wallet=new JSONObject();
+            try{wallet.put("id",DEFAULT_WALLET_ID);wallet.put("name","Dompet utama");walletList.put(wallet);}
+            catch(org.json.JSONException e){android.util.Log.e("KhasKu","Could not create default wallet",e);}
+            prefs.edit().putString("wallets",walletList.toString()).putString("activeWallet",DEFAULT_WALLET_ID).apply();
+        }
+        JSONArray all=transactions();
+        boolean migrated=false;
+        for(int i=0;i<all.length();i++){
+            JSONObject transaction=all.optJSONObject(i);
+            if(transaction!=null&&!transaction.has("walletId")){
+                try{transaction.put("walletId",DEFAULT_WALLET_ID);all.put(i,transaction);migrated=true;}
+                catch(org.json.JSONException e){android.util.Log.e("KhasKu","Could not migrate transaction wallet",e);}
+            }
+        }
+        if(migrated)prefs.edit().putString("transactions",all.toString()).apply();
+        String activeWallet=prefs.getString("activeWallet",DEFAULT_WALLET_ID);
+        boolean activeExists=false;
+        for(int i=0;i<walletList.length();i++){JSONObject wallet=walletList.optJSONObject(i);if(wallet!=null&&activeWallet.equals(wallet.optString("id"))){activeExists=true;break;}}
+        if(!activeExists)prefs.edit().putString("activeWallet",DEFAULT_WALLET_ID).apply();
+    }
+    private String walletName(String id){
+        JSONArray all=wallets();
+        for(int i=0;i<all.length();i++){JSONObject wallet=all.optJSONObject(i);if(wallet!=null&&id.equals(wallet.optString("id")))return wallet.optString("name","Dompet utama");}
+        return "Dompet utama";
+    }
+    private long walletSpent(String id){
+        long total=0;
+        JSONArray all=transactions();
+        for(int i=0;i<all.length();i++){JSONObject transaction=all.optJSONObject(i);if(transaction!=null&&id.equals(transaction.optString("walletId",DEFAULT_WALLET_ID)))total+=transaction.optLong("amount");}
+        return total;
+    }
+    private String normalizeGroup(String group){return "Tabungan".equals(group)?GROUPS[2]:group;}
+    private String defaultCategoryGroup(String category){
+        if("Tabungan".equals(category)||"Dana darurat".equals(category))return GROUPS[2];
+        if("Makan".equals(category)||"Transportasi".equals(category)||"Kuliah".equals(category)||"Kos".equals(category)||"Pulsa & Data".equals(category)||"Parkir kampus".equals(category))return GROUPS[0];
+        if("Jalan-jalan".equals(category)||"Belanja".equals(category)||"Top-up gim".equals(category)||"Kopi susu aren".equals(category)||"Langganan musik".equals(category))return GROUPS[1];
+        return null;
+    }
+    private String categoryGroup(String category){
+        String builtIn=defaultCategoryGroup(category);
+        if(builtIn!=null)return builtIn;
+        JSONArray all=customCategories();
+        for(int i=0;i<all.length();i++){JSONObject item=all.optJSONObject(i);if(item!=null&&category.equals(item.optString("name")))return normalizeGroup(item.optString("group",GROUPS[0]));}
+        return GROUPS[0];
+    }
+    private String[] categoriesForGroup(String group){
+        ArrayList<String> result=new ArrayList<>();
+        for(String category:CATEGORIES)if(normalizeGroup(group).equals(defaultCategoryGroup(category)))result.add(category);
+        if(GROUPS[2].equals(normalizeGroup(group))&&hasTransactionsForCategory("Tabungan"))result.add("Tabungan");
+        JSONArray custom=customCategories();
+        for(int i=0;i<custom.length();i++){JSONObject item=custom.optJSONObject(i);if(item!=null&&normalizeGroup(group).equals(normalizeGroup(item.optString("group",GROUPS[0]))))result.add(item.optString("name"));}
+        return result.toArray(new String[0]);
+    }
+    private String[] categoriesForSelection(String group,String selected){
+        String[] available=categoriesForGroup(group);
+        for(String category:available)if(category.equals(selected))return available;
+        String[] result=java.util.Arrays.copyOf(available,available.length+1);
+        result[available.length]=selected;
+        return result;
+    }
+    private String[] categoryNames(){
+        LinkedHashSet<String> names=new LinkedHashSet<>();
+        for(String category:CATEGORIES)names.add(category);
+        JSONArray custom=customCategories();
+        for(int i=0;i<custom.length();i++){JSONObject item=custom.optJSONObject(i);if(item!=null)names.add(item.optString("name"));}
+        JSONArray all=transactions();
+        for(int i=0;i<all.length();i++){JSONObject transaction=all.optJSONObject(i);if(transaction!=null)names.add(transaction.optString("category","Lainnya"));}
+        return names.toArray(new String[0]);
+    }
     private void render(){
         page=new LinearLayout(this); page.setOrientation(LinearLayout.VERTICAL); page.setBackgroundColor(BG); setContentView(page);
         ScrollView scroll=new ScrollView(this); scroll.setFillViewport(true); page.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         content=new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(dp(20),dp(12),dp(20),dp(24)); scroll.addView(content);
-        if(budget()==0) onboarding(); else if(screen.equals("Anggaran")) budgetSetup(false); else if(!prefs.getBoolean("setupDone",false)) onboarding2(); else switch(screen){case "Catat":history();break;case "Recehan":recehan();break;case "Ringkasan":summary();break;case "Transaksi":quickEntry();break;case "Tersimpan":saved();break;case "Proyeksi":forecast();break;default:home();}
+        if(budget()==0) onboarding(); else if(screen.equals("Anggaran")) budgetSetup(false); else if(!prefs.getBoolean("setupDone",false)) onboarding2(); else switch(screen){case "Catat":history();break;case "Dompet":walletManager();break;case "Kategori":categoryManager();break;case "Recehan":recehan();break;case "Ringkasan":summary();break;case "Transaksi":quickEntry();break;case "Tersimpan":saved();break;case "Proyeksi":forecast();break;default:home();}
         if(budget()>0 && prefs.getBoolean("setupDone",false) && !screen.equals("Transaksi")&&!screen.equals("Tersimpan")&&!screen.equals("Proyeksi")&&!screen.equals("Anggaran")) bottomNav();
     }
     private void onboarding(){
         progressIndicator(1);
         text(content,"LANGKAH 1 DARI 2",12,MUTED,true); text(content,"Atur anggaran bulananmu",23,DARK,true); text(content,"Mulai dengan jumlah yang ingin kamu kelola bulan ini.",14,MUTED,false);
         EditText amount=edit("1500000",true); content.addView(amount,space(52));
-        text(content,"Aturan 50/30/20",15,DARK,true); text(content,"Kebutuhan, keinginan, dan tabungan",13,MUTED,false);
-        for(int i=0;i<3;i++)rowCard(GROUPS[i],new String[]{"Makan, transportasi, kos","Jajan, hiburan, gaya hidup","Tabungan masa depan"}[i],new int[]{50,30,20}[i]+"%",COLORS[i]);
+        text(content,"Aturan 50/30/20",15,DARK,true); text(content,"Kebutuhan, keinginan, dan dana darurat",13,MUTED,false);
+        for(int i=0;i<3;i++)rowCard(GROUPS[i],new String[]{"Makan, transportasi, kos","Jajan, hiburan, gaya hidup","Dana untuk kebutuhan tak terduga"}[i],new int[]{50,30,20}[i]+"%",COLORS[i]);
         button(content,"Pakai aturan ini",()->{long n=parseAmount(amount.getText().toString()); if(n>0){prefs.edit().putLong("budget",n).putInt("share0",50).putInt("share1",30).putInt("share2",20).apply(); screen="Beranda";render();}else toast("Masukkan jumlah anggaran yang valid");});
         button(content,"Atur sendiri",()->{long n=parseAmount(amount.getText().toString());if(n>0){prefs.edit().putLong("budget",n).apply(); screen="Anggaran";render();}else toast("Masukkan jumlah anggaran yang valid");});
     }
@@ -120,6 +201,7 @@ public class MainActivity extends Activity {
     private void home(){
         header();
         text(content,new SimpleDateFormat("EEEE, d MMM",new Locale("id","ID")).format(new Date()),13,MUTED,false);
+        pill(content,"Dompet: "+walletName(selectedWalletId),()->{screen="Dompet";render();},false);
         cardTitle("ACUAN BELANJA HARI INI");
         long remaining=dailyPoolRemaining();
         long daily=Math.max(0,remaining/daysToNextPayout());
@@ -129,7 +211,7 @@ public class MainActivity extends Activity {
 
         LinearLayout budgetCard=card(content);
         LinearLayout budgetHeading=row(budgetCard);
-        text(budgetHeading,"Anggaran 50 / 30 / 20",16,DARK,true);
+        text(budgetHeading,allocationTitle(),16,DARK,true);
         for(int i=0;i<3;i++){
             long part=budget()*share(i)/100;
             budgetRow(budgetCard,GROUPS[i],groupSpent(GROUPS[i]),part,COLORS[i]);
@@ -160,6 +242,180 @@ public class MainActivity extends Activity {
         user.setGravity(Gravity.CENTER);
         r.addView(user,new LinearLayout.LayoutParams(dp(36),dp(36)));
         user.setOnClickListener(v->{screen="Anggaran";render();});
+    }
+
+    private void walletManager(){
+        header();
+        text(content,"Dompet",23,DARK,true);
+        text(content,"Pilih dompet untuk transaksi atau kelola dompetmu.",13,MUTED,false);
+        JSONArray all=wallets();
+        for(int i=0;i<all.length();i++){
+            JSONObject wallet=all.optJSONObject(i);
+            if(wallet==null)continue;
+            String id=wallet.optString("id",DEFAULT_WALLET_ID);
+            LinearLayout item=card(content);
+            LinearLayout heading=row(item);
+            text(heading,wallet.optString("name","Dompet utama"),16,DARK,true);
+            View spacer=new View(this);
+            heading.addView(spacer,new LinearLayout.LayoutParams(0,1,1));
+            if(id.equals(selectedWalletId))pill(heading,"Aktif",()->{},true);
+            text(item,money(walletSpent(id))+" pengeluaran tercatat",13,MUTED,false);
+            LinearLayout actions=row(item);
+            if(!id.equals(selectedWalletId))pill(actions,"Pakai",()->{selectedWalletId=id;prefs.edit().putString("activeWallet",id).apply();screen="Beranda";render();},false);
+            pill(actions,"Ubah nama",()->showWalletNameDialog(id,wallet.optString("name","Dompet utama")),false);
+            if(!DEFAULT_WALLET_ID.equals(id))pill(actions,"Hapus",()->deleteWallet(id),false);
+        }
+        button(content,"＋ Tambah Dompet",()->showWalletNameDialog(null,""));
+        button(content,"Kelola Kategori",()->{screen="Kategori";render();});
+    }
+
+    private void showWalletNameDialog(String walletId,String currentName){
+        EditText name=edit(currentName,false);
+        name.setHint("Nama dompet");
+        LinearLayout body=new LinearLayout(this);
+        body.setPadding(dp(20),dp(8),dp(20),0);
+        body.addView(name,space(52));
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle(walletId==null?"Tambah Dompet":"Ubah Nama Dompet").setView(body)
+                .setNegativeButton("Batal",null).setPositiveButton("Simpan",null).create();
+        dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            String value=name.getText().toString().trim();
+            if(value.isEmpty()){toast("Masukkan nama dompet");return;}
+            JSONArray all=wallets();
+            JSONObject target=null;
+            for(int i=0;i<all.length();i++){
+                JSONObject wallet=all.optJSONObject(i);
+                if(wallet==null)continue;
+                if(walletId!=null&&walletId.equals(wallet.optString("id"))){target=wallet;continue;}
+                if(value.equalsIgnoreCase(wallet.optString("name"))){toast("Nama dompet sudah digunakan");return;}
+            }
+            if(target==null){
+                target=new JSONObject();
+                try{target.put("id",UUID.randomUUID().toString());target.put("name",value);all.put(target);}
+                catch(org.json.JSONException e){android.util.Log.e("KhasKu","Could not create wallet",e);toast("Dompet gagal disimpan");return;}
+                selectedWalletId=target.optString("id",DEFAULT_WALLET_ID);
+                prefs.edit().putString("activeWallet",selectedWalletId).apply();
+            }else{
+                try{target.put("name",value);}
+                catch(org.json.JSONException e){android.util.Log.e("KhasKu","Could not rename wallet",e);toast("Nama dompet gagal disimpan");return;}
+            }
+            prefs.edit().putString("wallets",all.toString()).apply();
+            dialog.dismiss();
+            render();
+        }));
+        dialog.show();
+    }
+
+    private void deleteWallet(String walletId){
+        JSONArray entries=transactions();
+        for(int i=0;i<entries.length();i++){
+            JSONObject transaction=entries.optJSONObject(i);
+            if(transaction!=null&&walletId.equals(transaction.optString("walletId",DEFAULT_WALLET_ID))){toast("Dompet yang memiliki transaksi tidak dapat dihapus");return;}
+        }
+        new AlertDialog.Builder(this).setTitle("Hapus dompet?")
+                .setMessage("Dompet ini akan dihapus dari perangkat.")
+                .setNegativeButton("Batal",null).setPositiveButton("Hapus",(dialog,which)->{
+                    JSONArray all=wallets();
+                    for(int i=all.length()-1;i>=0;i--){JSONObject wallet=all.optJSONObject(i);if(wallet!=null&&walletId.equals(wallet.optString("id")))all.remove(i);}
+                    SharedPreferences.Editor editor=prefs.edit().putString("wallets",all.toString());
+                    if(walletId.equals(selectedWalletId)){selectedWalletId=DEFAULT_WALLET_ID;editor.putString("activeWallet",DEFAULT_WALLET_ID);}
+                    editor.apply();
+                    render();
+                }).show();
+    }
+
+    private void categoryManager(){
+        header();
+        text(content,"Kategori",23,DARK,true);
+        text(content,"Tambah kategori ke kebutuhan, keinginan, atau dana darurat.",13,MUTED,false);
+        for(String group:GROUPS){
+            cardTitle(group);
+            for(String category:categoriesForGroup(group)){
+                LinearLayout item=card(content);
+                LinearLayout line=row(item);
+                text(line,category,15,DARK,true);
+                View spacer=new View(this);
+                line.addView(spacer,new LinearLayout.LayoutParams(0,1,1));
+                text(line,group,12,MUTED,false);
+                if(isCustomCategory(category)){
+                    LinearLayout actions=row(item);
+                    pill(actions,"Ubah",()->showCustomCategoryDialog(category),false);
+                    pill(actions,"Hapus",()->removeCustomCategory(category),false);
+                }
+            }
+        }
+        button(content,"＋ Tambah Kategori",this::showCustomCategoryDialog);
+        button(content,"Kembali ke Dompet",()->{screen="Dompet";render();});
+    }
+
+    private boolean isCustomCategory(String name){
+        JSONArray all=customCategories();
+        for(int i=0;i<all.length();i++){JSONObject item=all.optJSONObject(i);if(item!=null&&name.equals(item.optString("name")))return true;}
+        return false;
+    }
+
+    private void showCustomCategoryDialog(){
+        showCustomCategoryDialog(null);
+    }
+
+    private void showCustomCategoryDialog(String editingName){
+        LinearLayout body=new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(20),dp(8),dp(20),0);
+        EditText name=edit(editingName==null?"":editingName,false);
+        name.setHint("Nama kategori");
+        name.setEnabled(editingName==null||!hasTransactionsForCategory(editingName));
+        body.addView(name,space(52));
+        Spinner groupSpinner=new Spinner(this);
+        ArrayAdapter<String> adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,GROUPS);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        groupSpinner.setAdapter(adapter);
+        if(editingName!=null)groupSpinner.setSelection(Math.max(0,java.util.Arrays.asList(GROUPS).indexOf(categoryGroup(editingName))));
+        body.addView(groupSpinner,space(48));
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle(editingName==null?"Tambah Kategori":"Ubah Kategori").setView(body)
+                .setNegativeButton("Batal",null).setPositiveButton("Simpan",null).create();
+        dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            String value=name.getText().toString().trim();
+            if(value.isEmpty()){toast("Masukkan nama kategori");return;}
+            JSONArray all=customCategories();
+            JSONObject item=null;
+            int itemIndex=-1;
+            for(int i=0;i<all.length();i++){
+                JSONObject candidate=all.optJSONObject(i);
+                if(candidate==null)continue;
+                if(editingName!=null&&editingName.equals(candidate.optString("name"))){item=candidate;itemIndex=i;continue;}
+                if(value.equalsIgnoreCase(candidate.optString("name"))){toast("Kategori sudah ada");return;}
+            }
+            for(String existing:categoryNames())if(!existing.equals(editingName)&&existing.equalsIgnoreCase(value)){toast("Kategori sudah ada");return;}
+            if(item==null)item=new JSONObject();
+            try{
+                item.put("name",value);
+                item.put("group",GROUPS[groupSpinner.getSelectedItemPosition()]);
+                if(itemIndex<0)all.put(item);else all.put(itemIndex,item);
+            }
+            catch(org.json.JSONException e){android.util.Log.e("KhasKu","Could not create category",e);toast("Kategori gagal disimpan");return;}
+            prefs.edit().putString("customCategories",all.toString()).apply();
+            dialog.dismiss();
+            render();
+        }));
+        dialog.show();
+    }
+
+    private boolean hasTransactionsForCategory(String name){
+        JSONArray entries=transactions();
+        for(int i=0;i<entries.length();i++){JSONObject transaction=entries.optJSONObject(i);if(transaction!=null&&name.equals(transaction.optString("category")))return true;}
+        return false;
+    }
+
+    private void removeCustomCategory(String name){
+        if(hasTransactionsForCategory(name)){toast("Kategori yang memiliki transaksi tidak dapat dihapus");return;}
+        JSONArray all=customCategories();
+        JSONArray remaining=new JSONArray();
+        for(int i=0;i<all.length();i++){
+            JSONObject item=all.optJSONObject(i);
+            if(item!=null&&!name.equals(item.optString("name")))remaining.put(item);
+        }
+        prefs.edit().putString("customCategories",remaining.toString()).apply();
+        render();
     }
 
     private LinearLayout card(LinearLayout parent){
@@ -211,7 +467,8 @@ public class MainActivity extends Activity {
         for(String group:GROUPS)pill(groupFilters,group,()->{historyFilter=group;render();},historyFilter.equals(group));
         LinearLayout moreFilters=row(content);
         pill(moreFilters,"Jejak Recehan",()->{historyFilter="Recehan";render();},historyFilter.equals("Recehan"));
-        pill(moreFilters,"Pilih kategori",()->new AlertDialog.Builder(this).setTitle("Pilih kategori").setItems(CATEGORIES,(dialog,which)->{historyCategory=CATEGORIES[which];historyFilter="Kategori";render();}).show(),historyFilter.equals("Kategori"));
+        String[] availableCategories=categoryNames();
+        pill(moreFilters,"Pilih kategori",()->new AlertDialog.Builder(this).setTitle("Pilih kategori").setItems(availableCategories,(dialog,which)->{historyCategory=availableCategories[which];historyFilter="Kategori";render();}).show(),historyFilter.equals("Kategori"));
         LinearLayout totals=card(content);
         text(totals,"Total pengeluaran",12,MUTED,false);
         text(totals,money(spent()),20,DARK,true);
@@ -229,7 +486,7 @@ public class MainActivity extends Activity {
         text(stable,money(spentSince(weekStart())),24,DARK,true);
         text(stable,"dari "+money(budget())+" anggaran bulanan",12,MUTED,false);
         LinearLayout allocation=card(content);
-        text(allocation,"Anggaran 50 / 30 / 20",16,DARK,true);
+        text(allocation,allocationTitle(),16,DARK,true);
         for(int i=0;i<3;i++){
             long part=budget()*share(i)/100;
             budgetRow(allocation,GROUPS[i],groupSpentSince(GROUPS[i],periodStart()),part,COLORS[i]);
@@ -589,15 +846,15 @@ public class MainActivity extends Activity {
         text(calculation,"Sisa waktu     "+daysToNextPayout()+" hari",16,DARK,true);
         button(content,"＋ Catat Lagi",()->{screen="Transaksi";render();});
     }
-    private void budgetSetup(boolean unused){text(content,"‹  Atur Anggaran",22,DARK,true);EditText amount=edit(String.valueOf(budget()),true);content.addView(amount,space(52));text(content,"Pembagian anggaran (%)",16,DARK,true);EditText[] shares=new EditText[3];for(int i=0;i<3;i++){rowCard(GROUPS[i],"Bagian dari anggaran bulanan",share(i)+"%",COLORS[i]);shares[i]=edit(String.valueOf(share(i)),true);content.addView(shares[i],space(48));}button(content,"Simpan Anggaran",()->{long n=parseAmount(amount.getText().toString());int[] values=new int[3];int total=0;for(int i=0;i<3;i++){long p=parseAmount(shares[i].getText().toString());if(p>100){toast("Persentase harus 0–100");return;}values[i]=(int)p;total+=values[i];}if(n<=0){toast("Masukkan jumlah yang valid");return;}if(total!=100){toast("Total pembagian harus 100%");return;}SharedPreferences.Editor e=prefs.edit().putLong("budget",n);for(int i=0;i<3;i++)e.putInt("share"+i,values[i]);e.apply();screen="Beranda";render();});}
+    private void budgetSetup(boolean unused){text(content,"‹  Atur Anggaran",22,DARK,true);EditText amount=edit(String.valueOf(budget()),true);content.addView(amount,space(52));text(content,"Pembagian anggaran (%)",16,DARK,true);EditText[] shares=new EditText[3];for(int i=0;i<3;i++){rowCard(GROUPS[i],"Bagian dari anggaran bulanan",share(i)+"%",COLORS[i]);shares[i]=edit(String.valueOf(share(i)),true);content.addView(shares[i],space(48));}button(content,"Simpan Anggaran",()->{long n=parseAmount(amount.getText().toString());int[] values=new int[3];int total=0;for(int i=0;i<3;i++){long p=parseAmount(shares[i].getText().toString());if(p>100){toast("Persentase harus 0–100");return;}values[i]=(int)p;total+=values[i];}if(n<=0){toast("Masukkan jumlah yang valid");return;}if(total!=100){toast("Total pembagian harus 100%");return;}SharedPreferences.Editor e=prefs.edit().putLong("budget",n);for(int i=0;i<3;i++)e.putInt("share"+i,values[i]);e.apply();screen="Beranda";render();});button(content,"Kelola Dompet",()->{screen="Dompet";render();});button(content,"Kelola Kategori",()->{screen="Kategori";render();});}
     private void quickEntry(){
         LinearLayout top=row(content);
         TextView close=makeText("×",28,MUTED,true);
         top.addView(close);
-        close.setOnClickListener(v->{drafts();screen="Beranda";render();});
+        close.setOnClickListener(v->{drafts();editingTransactionIndex=-1;screen="Catat";render();});
         View titleSpacer=new View(this);
         top.addView(titleSpacer,new LinearLayout.LayoutParams(0,1,1));
-        text(top,"Catat Cepat",23,DARK,true);
+        text(top,editingTransactionIndex<0?"Catat Cepat":"Ubah Transaksi",23,DARK,true);
         View closeSpacer=new View(this);
         top.addView(closeSpacer,new LinearLayout.LayoutParams(0,1,1));
         text(content,"CATAT PENGELUARANMU",11,TEAL,true);
@@ -606,6 +863,7 @@ public class MainActivity extends Activity {
         amountInput.setHint("Rp 0");
         amountInput.setTextSize(TypedValue.COMPLEX_UNIT_SP,30);
         content.addView(amountInput,space(64));
+        pill(content,"Dompet: "+walletName(selectedWalletId),()->chooseWallet(),false);
         LinearLayout category=card(content);
         text(category,"Kategori",12,MUTED,false);
         TextView selected=text(category,selectedCategory+"  ·  "+selectedGroup+"     ›",17,DARK,true);
@@ -615,8 +873,21 @@ public class MainActivity extends Activity {
         noteInput=edit(draftNote,false);
         noteInput.setHint("Catatan transaksi");
         content.addView(noteInput,space(50));
-        button(content,"✓ Simpan Transaksi",this::saveTransaction);
+        button(content,editingTransactionIndex<0?"✓ Simpan Transaksi":"✓ Simpan Perubahan",this::saveTransaction);
         text(content,"Tersimpan hanya di perangkat ini",12,MUTED,false);
+    }
+
+    private void chooseWallet(){
+        JSONArray all=wallets();
+        String[] names=new String[all.length()];
+        String[] ids=new String[all.length()];
+        for(int i=0;i<all.length();i++){JSONObject wallet=all.optJSONObject(i);names[i]=wallet==null?"Dompet utama":wallet.optString("name","Dompet utama");ids[i]=wallet==null?DEFAULT_WALLET_ID:wallet.optString("id",DEFAULT_WALLET_ID);}
+        new AlertDialog.Builder(this).setTitle("Pilih Dompet").setItems(names,(dialog,which)->{
+            drafts();
+            selectedWalletId=ids[which];
+            prefs.edit().putString("activeWallet",selectedWalletId).apply();
+            render();
+        }).setNegativeButton("Batal",null).show();
     }
 
     private void showCategoryDialog(){
@@ -636,10 +907,10 @@ public class MainActivity extends Activity {
         labelParams.topMargin=dp(12);
         body.addView(categoryLabel,labelParams);
         Spinner categorySpinner=new Spinner(this);
-        ArrayAdapter<String> categoryAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,categoriesForGroup(selectedGroup));
+        ArrayAdapter<String> categoryAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,categoriesForSelection(selectedGroup,selectedCategory));
         categoryAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         categorySpinner.setAdapter(categoryAdapter);
-        String[] initialCategories=categoriesForGroup(selectedGroup);
+        String[] initialCategories=categoriesForSelection(selectedGroup,selectedCategory);
         int selectedIndex=Math.max(0,java.util.Arrays.asList(initialCategories).indexOf(selectedCategory));
         categorySpinner.setSelection(selectedIndex);
         body.addView(categorySpinner,space(48));
@@ -652,7 +923,7 @@ public class MainActivity extends Activity {
         groupSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){
             @Override public void onItemSelected(android.widget.AdapterView<?> parent,View view,int position,long id){
                 String group=GROUPS[position];
-                String[] options=categoriesForGroup(group);
+                String[] options=group.equals(selectedGroup)?categoriesForSelection(group,selectedCategory):categoriesForGroup(group);
                 ArrayAdapter<String> adapter=new ArrayAdapter<>(MainActivity.this,android.R.layout.simple_spinner_item,options);
                 adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
                 categorySpinner.setAdapter(adapter);
@@ -674,25 +945,22 @@ public class MainActivity extends Activity {
         dialog.show();
     }
 
-    private String[] categoriesForGroup(String group){
-        if("Kebutuhan".equals(group))return new String[]{"Makan","Transportasi","Kuliah","Kos","Pulsa & Data","Parkir kampus"};
-        if("Keinginan".equals(group))return new String[]{"Jalan-jalan","Belanja","Top-up gim","Kopi susu aren","Langganan musik"};
-        return new String[]{"Tabungan"};
-    }
-
     private void saveTransaction(){
         long amount=parseAmount(amountInput.getText().toString());
         if(amount<=0){toast("Masukkan nominal yang valid");return;}
         JSONArray all=transactions();
-        JSONObject transaction=new JSONObject();
+        JSONObject transaction=editingTransactionIndex>=0?all.optJSONObject(editingTransactionIndex):new JSONObject();
+        if(transaction==null){toast("Transaksi tidak ditemukan");editingTransactionIndex=-1;screen="Catat";render();return;}
+        boolean editing=editingTransactionIndex>=0;
         try{
             transaction.put("amount",amount);
             transaction.put("category",selectedCategory);
             transaction.put("group",selectedGroup);
             transaction.put("note",noteInput.getText().toString().trim());
-            transaction.put("date",System.currentTimeMillis());
+            if(!editing)transaction.put("date",System.currentTimeMillis());
             transaction.put("crumbs",selectedCrumbs);
-            all.put(transaction);
+            transaction.put("walletId",selectedWalletId);
+            if(editing)all.put(editingTransactionIndex,transaction);else all.put(transaction);
         }catch(org.json.JSONException e){
             android.util.Log.e("KhasKu","Could not save transaction",e);
             toast("Transaksi gagal disimpan");
@@ -701,6 +969,7 @@ public class MainActivity extends Activity {
         prefs.edit().putString("transactions",all.toString()).apply();
         lastSavedAmount=amount;
         lastSavedCrumbs=selectedCrumbs;
+        editingTransactionIndex=-1;
         selectedCrumbs=false;
         draftAmount="";
         draftNote="";
@@ -720,7 +989,7 @@ public class MainActivity extends Activity {
             if(screen.equals("Recehan")&&(!o.optBoolean("crumbs",false)||o.optLong("date")<weekStart()))continue;
             if(screen.equals("Catat")){
                 if(GROUPS[0].equals(historyFilter)||GROUPS[1].equals(historyFilter)||GROUPS[2].equals(historyFilter)){
-                    if(!historyFilter.equals(o.optString("group")))continue;
+                    if(!historyFilter.equals(normalizeGroup(o.optString("group"))))continue;
                 }
                 if(historyFilter.equals("Recehan")&&(!o.optBoolean("crumbs",false)||o.optLong("date")<weekStart()))continue;
                 if(historyFilter.equals("Kategori")&&!historyCategory.equals(cat))continue;
@@ -735,35 +1004,76 @@ public class MainActivity extends Activity {
             name.setOrientation(LinearLayout.VERTICAL);
             r.addView(name,new LinearLayout.LayoutParams(0,-2,1));
             text(name,note.isEmpty()?cat:note,14,DARK,true);
-            text(name,cat+" · "+new SimpleDateFormat("d MMM · HH:mm",new Locale("id","ID")).format(new Date(o.optLong("date"))),11,MUTED,false);
+            text(name,cat+" · "+walletName(o.optString("walletId",DEFAULT_WALLET_ID))+" · "+new SimpleDateFormat("d MMM · HH:mm",new Locale("id","ID")).format(new Date(o.optLong("date"))),11,MUTED,false);
             text(r,"−"+money(o.optLong("amount")),14,DARK,true);
+            TextView actions=makeText("⋮",22,MUTED,true);
+            actions.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams actionsParams=new LinearLayout.LayoutParams(dp(32),dp(40));
+            r.addView(actions,actionsParams);
             r.setPadding(0,dp(10),0,dp(10));
+            int transactionIndex=i;
+            r.setOnClickListener(v->showTransactionActions(transactionIndex));
+            actions.setOnClickListener(v->showTransactionActions(transactionIndex));
             shown++;
         }
         if(shown==0)text(parent,"Tidak ada transaksi untuk filter ini",14,MUTED,false);
     }
 
+    private void showTransactionActions(int index){
+        JSONArray all=transactions();
+        JSONObject transaction=all.optJSONObject(index);
+        if(transaction==null)return;
+        new AlertDialog.Builder(this).setTitle(transaction.optString("category","Transaksi"))
+                .setItems(new String[]{"Ubah","Hapus"},(dialog,which)->{
+                    if(which==0)editTransaction(index);
+                    else new AlertDialog.Builder(this).setTitle("Hapus transaksi?")
+                            .setMessage("Transaksi ini akan dihapus dari riwayat dan perhitungan anggaran.")
+                            .setNegativeButton("Batal",null).setPositiveButton("Hapus",(confirm,selected)->{
+                                JSONArray latest=transactions();
+                                if(index<0||index>=latest.length()){toast("Transaksi tidak ditemukan");return;}
+                                latest.remove(index);
+                                prefs.edit().putString("transactions",latest.toString()).apply();
+                                render();
+                            }).show();
+                }).show();
+    }
+
+    private void editTransaction(int index){
+        JSONObject transaction=transactions().optJSONObject(index);
+        if(transaction==null){toast("Transaksi tidak ditemukan");return;}
+        editingTransactionIndex=index;
+        draftAmount=String.valueOf(transaction.optLong("amount"));
+        draftNote=transaction.optString("note","");
+        selectedGroup=normalizeGroup(transaction.optString("group",GROUPS[0]));
+        selectedCategory=transaction.optString("category",categoriesForGroup(selectedGroup)[0]);
+        selectedCrumbs=transaction.optBoolean("crumbs",false);
+        selectedWalletId=transaction.optString("walletId",DEFAULT_WALLET_ID);
+        screen="Transaksi";
+        render();
+    }
+
     private void addTopCategoryRows(LinearLayout parent,long from){
-        long[] totals=new long[CATEGORIES.length];
-        int[] order=new int[CATEGORIES.length];
+        String[] categories=categoryNames();
+        long[] totals=new long[categories.length];
+        int[] order=new int[categories.length];
         for(int i=0;i<order.length;i++)order[i]=i;
         JSONArray all=transactions();
         for(int i=0;i<all.length();i++){
             JSONObject o=all.optJSONObject(i);
             if(o==null||o.optLong("date")<from)continue;
-            for(int j=0;j<CATEGORIES.length;j++)if(CATEGORIES[j].equals(o.optString("category")))totals[j]+=o.optLong("amount");
+            for(int j=0;j<categories.length;j++)if(categories[j].equals(o.optString("category")))totals[j]+=o.optLong("amount");
         }
         for(int i=0;i<order.length;i++)for(int j=i+1;j<order.length;j++)if(totals[order[j]]>totals[order[i]]){int n=order[i];order[i]=order[j];order[j]=n;}
         int count=0;
         for(int idx:order){
             if(count>=3||totals[idx]==0)break;
-            rowCard(parent,CATEGORIES[idx],"Pengeluaran",money(totals[idx]),COLORS[count%COLORS.length]);
+            rowCard(parent,categories[idx],"Pengeluaran",money(totals[idx]),COLORS[count%COLORS.length]);
             count++;
         }
         if(count==0)text(parent,"Belum ada transaksi di periode ini.",14,MUTED,false);
     }
     private long groupSpent(String group){return groupSpentSince(group,periodStart());}
-    private long groupSpentSince(String group,long from){long sum=0;JSONArray a=transactions();for(int i=0;i<a.length();i++){JSONObject o=a.optJSONObject(i);if(o!=null&&group.equals(o.optString("group"))&&o.optLong("date")>=from)sum+=o.optLong("amount");}return sum;}
+    private long groupSpentSince(String group,long from){long sum=0;JSONArray a=transactions();for(int i=0;i<a.length();i++){JSONObject o=a.optJSONObject(i);if(o!=null&&normalizeGroup(group).equals(normalizeGroup(o.optString("group")))&&o.optLong("date")>=from)sum+=o.optLong("amount");}return sum;}
     private String weekRange(){
         Calendar start=Calendar.getInstance();
         start.setTimeInMillis(weekStart());
@@ -780,27 +1090,28 @@ public class MainActivity extends Activity {
     private long crumbsSince(long from){long sum=0;JSONArray a=transactions();for(int i=0;i<a.length();i++){JSONObject o=a.optJSONObject(i);if(o!=null&&o.optBoolean("crumbs",false)&&o.optLong("date")>=from)sum+=o.optLong("amount");}return sum;}
     private int crumbCountSince(long from){int count=0;JSONArray a=transactions();for(int i=0;i<a.length();i++){JSONObject o=a.optJSONObject(i);if(o!=null&&o.optBoolean("crumbs",false)&&o.optLong("date")>=from)count++;}return count;}
     private void addTopCrumbRows(LinearLayout parent,long from){
-        long[] totals=new long[CATEGORIES.length];
+        String[] categories=categoryNames();
+        long[] totals=new long[categories.length];
         JSONArray all=transactions();
         for(int i=0;i<all.length();i++){
             JSONObject o=all.optJSONObject(i);
             if(o==null||!o.optBoolean("crumbs",false)||o.optLong("date")<from)continue;
-            for(int j=0;j<CATEGORIES.length;j++)if(CATEGORIES[j].equals(o.optString("category")))totals[j]+=o.optLong("amount");
+            for(int j=0;j<categories.length;j++)if(categories[j].equals(o.optString("category")))totals[j]+=o.optLong("amount");
         }
-        int[] order=new int[CATEGORIES.length];
+        int[] order=new int[categories.length];
         for(int i=0;i<order.length;i++)order[i]=i;
         for(int i=0;i<order.length;i++)for(int j=i+1;j<order.length;j++)if(totals[order[j]]>totals[order[i]]){int n=order[i];order[i]=order[j];order[j]=n;}
         int count=0;
         for(int idx:order){
             if(count>=4||totals[idx]==0)break;
-            rowCard(parent,CATEGORIES[idx],"Jejak Recehan",money(totals[idx]),COLORS[count%COLORS.length]);
+            rowCard(parent,categories[idx],"Jejak Recehan",money(totals[idx]),COLORS[count%COLORS.length]);
             count++;
         }
         if(count==0)text(parent,"Belum ada recehan tercatat minggu ini.",14,MUTED,false);
     }
     private int activeDaysThisWeek(){java.util.HashSet<String> days=new java.util.HashSet<>();JSONArray a=transactions();SimpleDateFormat f=new SimpleDateFormat("yyyyMMdd",Locale.ROOT);long start=weekStart();for(int i=0;i<a.length();i++){JSONObject o=a.optJSONObject(i);if(o!=null&&o.optLong("date")>=start)days.add(f.format(new Date(o.optLong("date"))));}return days.size();}
     private int daysToNextPayout(){Calendar today=Calendar.getInstance();today.set(Calendar.HOUR_OF_DAY,0);today.set(Calendar.MINUTE,0);today.set(Calendar.SECOND,0);today.set(Calendar.MILLISECOND,0);int payday=prefs.getInt("payoutDay",1);Calendar next=(Calendar)today.clone();next.set(Calendar.DAY_OF_MONTH,1);int effectiveDay=Math.min(payday,next.getActualMaximum(Calendar.DAY_OF_MONTH));if(today.get(Calendar.DAY_OF_MONTH)>=effectiveDay)next.add(Calendar.MONTH,1);next.set(Calendar.DAY_OF_MONTH,Math.min(payday,next.getActualMaximum(Calendar.DAY_OF_MONTH)));return Math.max(1,(int)((next.getTimeInMillis()-today.getTimeInMillis())/86400000L));}
-    private void bottomNav(){LinearLayout nav=new LinearLayout(this);nav.setBackgroundColor(Color.WHITE);nav.setElevation(dp(8));page.addView(nav,new LinearLayout.LayoutParams(-1,dp(62)));String[] labels={"Beranda","Catat","Recehan","Ringkasan"};String[] icons={"⌂","≡","Ⓢ","⌁"};for(int i=0;i<labels.length;i++){String s=labels[i];TextView t=makeText(icons[i]+"\n"+s,11,screen.equals(s)?TEAL:MUTED,screen.equals(s));t.setGravity(Gravity.CENTER);nav.addView(t,new LinearLayout.LayoutParams(0,-1,1));t.setOnClickListener(v->{screen=s;render();});}}
+    private void bottomNav(){LinearLayout nav=new LinearLayout(this);nav.setBackgroundColor(Color.WHITE);nav.setElevation(dp(8));page.addView(nav,new LinearLayout.LayoutParams(-1,dp(62)));String[] labels={"Beranda","Catat","Dompet","Recehan","Ringkasan"};String[] icons={"⌂","≡","▣","Ⓢ","⌁"};for(int i=0;i<labels.length;i++){String s=labels[i];TextView t=makeText(icons[i]+"\n"+s,10,screen.equals(s)?TEAL:MUTED,screen.equals(s));t.setGravity(Gravity.CENTER);nav.addView(t,new LinearLayout.LayoutParams(0,-1,1));t.setOnClickListener(v->{screen=s;render();});}}
     private void cardTitle(String s){TextView t=text(content,s,16,DARK,true);t.setPadding(0,dp(13),0,dp(7));}
     private void rowCard(String title,String sub,String value,int color){rowCard(content,title,sub,value,color);}
     private void rowCard(LinearLayout parent,String title,String sub,String value,int color){LinearLayout r=new LinearLayout(this);r.setOrientation(LinearLayout.HORIZONTAL);r.setGravity(Gravity.CENTER_VERTICAL);r.setPadding(dp(12),dp(12),dp(12),dp(12));r.setBackground(shape(0xfff8f9fc,dp(12)));TextView dot=text(r,"●",14,color,true);dot.setPadding(0,0,dp(9),0);LinearLayout copy=new LinearLayout(this);copy.setOrientation(1);r.addView(copy,new LinearLayout.LayoutParams(0,-2,1));text(copy,title,14,DARK,true);text(copy,sub,11,MUTED,false);text(r,value,13,DARK,true);LinearLayout.LayoutParams lp=space(72);lp.bottomMargin=dp(7);parent.addView(r,lp);}
